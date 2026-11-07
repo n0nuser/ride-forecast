@@ -125,7 +125,7 @@ sudo systemctl enable --now ride-forecast.timer
 
 ```
 sudo systemctl start ride-forecast.service    # run it now
-journalctl -u ride-forecast -n 20             # see the output
+sudo journalctl -u ride-forecast -n 20        # see the output (plain users need the systemd-journal group)
 systemctl list-timers ride-forecast.timer     # see when it fires next
 ```
 
