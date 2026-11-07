@@ -1,6 +1,8 @@
 """Hourly chart for one day: scores, temperature and rain, gusts. matplotlib is imported lazily."""
 import io
 
+import ride
+
 BLOCKS = "▁▂▃▄▅▆▇█"
 
 
@@ -10,18 +12,15 @@ def sparkline(rows):
     return "".join(BLOCKS[min(7, int(by[h] / 12.5))] if h in by else "·" for h in range(24))
 
 
-def render(report):
-    import matplotlib
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-
+def _draw(fig, axes, report, plt):
     rows = report["rows"]
     x = [r["hour"] for r in rows]
-    fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(9, 7), sharex=True, gridspec_kw={"height_ratios": [3, 2, 1.3]})
+    ax1, ax2, ax3 = axes
     fig.suptitle(f"{report['label']} · {report['day']}", fontsize=11)
 
     # score panel: verdict bands, each source thin, the median thick, stops marked
-    for lo, hi, c in ((70, 100, "#2e9e5b"), (45, 70, "#e0a800"), (0, 45, "#d64545")):
+    (ok, _), (caution, _), _ = ride.TRIP_BANDS
+    for lo, hi, c in ((ok, 100, "#2e9e5b"), (caution, ok, "#e0a800"), (0, caution, "#d64545")):
         ax1.axhspan(lo, hi, color=c, alpha=0.10, lw=0)
     for n in sorted({n for r in rows for n in r["per"]}):
         pts = [(r["hour"], r["per"][n]) for r in rows if n in r["per"]]
@@ -47,10 +46,10 @@ def render(report):
 
     # wind panel
     ax3.plot(x, [r["w"].gust or 0 for r in rows], color="#555", lw=1.6)
-    ax3.axhline(40, color="#e0a800", ls="--", lw=0.8)
-    ax3.axhline(70, color="#d64545", ls="--", lw=0.8)
+    ax3.axhline(ride.GUST_FROM, color="#e0a800", ls="--", lw=0.8)
+    ax3.axhline(ride.GUST_STOP, color="#d64545", ls="--", lw=0.8)
     ax3.set_ylabel("gusts km/h")
-    ax3.set_ylim(0, max(75, max((r["w"].gust or 0) for r in rows) * 1.1))
+    ax3.set_ylim(0, max(ride.GUST_STOP + 5, max((r["w"].gust or 0) for r in rows) * 1.1))
     ax3.set_xlim(-0.5, 23.5)
     ax3.set_xticks(range(0, 24, 2))
     ax3.set_xlabel("hour (local)")
@@ -59,7 +58,19 @@ def render(report):
     h, l = ax1.get_legend_handles_labels()
     fig.legend(h, l, ncol=7, fontsize=8, loc="lower center", frameon=False)
     fig.tight_layout(rect=(0, 0.04, 1, 0.96))
-    buf = io.BytesIO()
-    fig.savefig(buf, format="png", dpi=110)
-    plt.close(fig)
-    return buf.getvalue()
+
+
+
+def render(report):
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    fig, axes = plt.subplots(3, 1, figsize=(9, 7), sharex=True, gridspec_kw={"height_ratios": [3, 2, 1.3]})
+    try:
+        _draw(fig, axes, report, plt)
+        buf = io.BytesIO()
+        fig.savefig(buf, format="png", dpi=110)
+        return buf.getvalue()
+    finally:
+        plt.close(fig)

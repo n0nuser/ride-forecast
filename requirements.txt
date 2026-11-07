@@ -1,1 +1,2 @@
-matplotlib
+# Charts only. The bot and the tests also run without it (text sparkline instead of a PNG).
+matplotlib>=3.8,<4

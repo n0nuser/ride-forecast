@@ -2,12 +2,18 @@
 Description=Ride forecast Telegram bot
 After=network-online.target
 Wants=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=10
 
 [Service]
+Type=notify
+NotifyAccess=main
+WatchdogSec=300
 EnvironmentFile=/etc/ride-forecast.env
 ExecStart=/opt/ride-forecast/.venv/bin/python /opt/ride-forecast/bot.py
 Restart=always
 RestartSec=10
+RestartPreventExitStatus=2
 DynamicUser=yes
 StateDirectory=ride-forecast
 CacheDirectory=ride-forecast
