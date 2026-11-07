@@ -1,0 +1,21 @@
+[Unit]
+Description=Ride forecast Telegram bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+EnvironmentFile=/etc/ride-forecast.env
+ExecStart=/opt/ride-forecast/.venv/bin/python /opt/ride-forecast/bot.py
+Restart=always
+RestartSec=10
+DynamicUser=yes
+StateDirectory=ride-forecast
+CacheDirectory=ride-forecast
+Environment=MPLCONFIGDIR=/var/cache/ride-forecast
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=multi-user.target
