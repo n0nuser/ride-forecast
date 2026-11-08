@@ -8,7 +8,8 @@ The trips are yours. Nothing is built in: you tell the bot when you ride, and it
 Mon 09 Nov · Salamanca, Castille and León, ES
 🔴 work 07:30-09:00: STAY HOME, 13°C, 87% humidity, rain 0.2 mm at 08:00, sources disagree
 🟢 home 17:00-19:00: OK, 14 to 16°C, 70 to 76% humidity, gusts 51 km/h at 17:00
-Day 08-20: Mixed: ride in the best window (59/100), best 17:00-20:00 (82)
+Whole day 08:00-20:00: 59/100, Mixed: ride in the best window
+Best 3 hours: 17:00-20:00, 82/100
 Gear: rain gear, strong wind, 54 km/h gusts
 6 sources, SOURCES DISAGREE, low confidence: MET.no 86 · ECMWF 68 · MeteoFr 67 · ICON 66 · UKMO 60 · GFS 50
 ```
@@ -64,7 +65,7 @@ A trip is a name, a time window and optionally the days it applies to. A trip is
 
 If the sources are more than 30 points apart over the trip, the score is lowered and the line says "sources disagree". Each line shows the temperature and humidity range of the trip, and names the single factor that drives the verdict with its hour. Trips only appear on their days.
 
-With no trips set, the bot shows the day line and tells you how to add trips. The `Day 08-20` line is always there: the average score of the day, the best 3-hour window, and a cap at "marginal" if any hour is dangerous. A gear line appears when it is cold, icy, wet, foggy or windy. The sources line counts only sources that cover the whole day.
+With no trips set, the bot shows the day line and tells you how to add trips. The `Whole day` line is always there: the day's score (the average of the hours 08:00-20:00, lifted toward the best window and lowered when sources disagree), the best 3-hour window, and a cap at "marginal" if any hour is dangerous. A gear line appears when it is cold, icy, wet, foggy or windy. The sources line counts only sources that cover the whole day.
 
 The weights are judgment calls, not tuned values. They are constants at the top of `ride.py`.
 

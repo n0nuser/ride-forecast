@@ -389,7 +389,7 @@ def build_report(g, day, sources, trips):
         lines.append(f"{ICONS[e['verdict']]} {e['name']} {e['window']}: {e['verdict']}, {e['temp']}, {e['humidity']} humidity, {e['reason']}"
                      + (", sources disagree" if e["spread"] > SPREAD_LIMIT else ""))
     if summ:
-        lines.append(f"Day 08-20: {summ['verdict']} ({summ['score']}/100), best {summ['window']} ({summ['window_score']})")
+        lines.append(f"Whole day 08:00-20:00: {summ['score']}/100, {summ['verdict']}\nBest 3 hours: {summ['window']}, {summ['window_score']}/100")
     if gear := _gear([by_hour[h] for e in ev for h in e["hours"]] or [r for r in rows if r["hour"] in DAY_HOURS]):
         lines.append("Gear: " + ", ".join(gear))
     if summ:

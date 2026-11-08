@@ -108,7 +108,7 @@ assert "warm layers and gloves (4°C)" in build_report(G, MON, {"a": day_of(MON,
 rainy = build_report(G, MON, {"a": day_of(MON, mm=0.5), "b": day_of(MON, mm=0.5)}, TRIPS)["text"]
 assert "rain gear" in rainy and "rain 0.5 mm" in rainy
 notrips = build_report(G, MON, {"a": day_of(MON)}, [])
-assert notrips["trips"] == [] and "Day 08-20" in notrips["text"]
+assert notrips["trips"] == [] and "Whole day 08:00-20:00" in notrips["text"]
 
 # --- disagreement lowers the numbers, not just the label: a perfect source and a poor one
 poor = next(OK._replace(pop=None, mm=m / 100) for m in range(1, 200) if 40 <= hour_score(OK._replace(pop=None, mm=m / 100)) <= 45)

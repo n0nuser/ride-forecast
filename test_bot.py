@@ -72,7 +72,7 @@ assert "bad trip" in text(bot.handle(s, "/trips nonsense")) and bot.State(s.path
 # --- trips are local: nothing built in; the environment is only a default; the chat can override or reset
 fresh = new_state(g=G)
 assert fresh.trips_spec() == "" and text(bot.handle(fresh, "/trips")).startswith("Trips: none") and "No trips set" in text(bot.handle(fresh, "/trips"))
-assert text(bot.handle(fresh, "/today")).endswith(bot.NO_TRIPS) and "Day 08-20" in text(bot.handle(fresh, "/today"))   # the day line, plus a hint how to add trips
+assert text(bot.handle(fresh, "/today")).endswith(bot.NO_TRIPS) and "Whole day 08:00-20:00" in text(bot.handle(fresh, "/today"))   # the day line, plus a hint how to add trips
 assert "No trips set" not in text(bot.handle(s, "/today"))
 os.environ["RIDE_TRIPS"] = "x 06:00-07:00"
 env_only = new_state(g=G)
