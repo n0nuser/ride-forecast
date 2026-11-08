@@ -288,3 +288,7 @@ try:
 except ride.UserError:
     pass
 print("ok")
+
+# regression: spread penalty can push a trip score below 0; it must clamp, not crash
+_r = lambda s, per: dict(score=s, per=per, stop=False, reason="fine", hour=8, w=Hour(10, 50, 0, 0, 0, 0))
+assert ride.eval_trip(dict(name="x", **{k: v for k, v in ride.parse_trips("x 08:00-09:00")[0].items() if k != "name"}), {8: _r(5, {"a": 0, "b": 100})})["verdict"] == "STAY HOME"

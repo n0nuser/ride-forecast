@@ -328,11 +328,11 @@ def eval_trip(t, by_hour):
         return None
     worst = min(rows, key=lambda r: r["score"])
     spread = max(max(r["per"].values()) - min(r["per"].values()) for r in rows)
-    score = worst["score"] - (round(spread / SPREAD_DIVISOR) if spread > SPREAD_LIMIT else 0)
+    score = max(0, worst["score"] - (round(spread / SPREAD_DIVISOR) if spread > SPREAD_LIMIT else 0))
     stop = next((r for r in rows if r["stop"]), None)
     verdict = "STAY HOME" if stop else next(v for m, v in TRIP_BANDS if score >= m)
     where = stop or worst
-    return dict(name=t["name"], window=trip_window(t), score=max(0, score), verdict=verdict, spread=spread,
+    return dict(name=t["name"], window=trip_window(t), score=score, verdict=verdict, spread=spread,
                 temp=_rng(min(r["w"].t for r in rows), max(r["w"].t for r in rows), "°C"),
                 humidity=_rng(min(r["w"].rh for r in rows), max(r["w"].rh for r in rows), "%"),
                 reason="fine" if where["reason"] == "fine" else f"{where['reason']} at {where['hour']:02d}:00",
