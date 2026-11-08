@@ -3,7 +3,7 @@
 Long-polls the Bot API, stdlib only (charts need matplotlib; without it you get a text sparkline).
 Env: TELEGRAM_TOKEN, TELEGRAM_CHAT_ID (the only chat it answers), RIDE_PLACE, RIDE_COUNTRY, RIDE_TRIPS,
      RIDE_PUSH_TIME (HH:MM local, default 21:00), STATE_DIRECTORY (systemd sets it).
-Commands: /today /tomorrow /date <day> /chart [day] /place [name[, CC]] /trips [spec|reset|none] /help
+Commands: /today /tomorrow /date <day> /week /chart [day|week] /place [name[, CC]] /trips [spec|reset|none] /help
 """
 import json, os, re, socket, sys, time, urllib.parse, urllib.request, uuid
 from datetime import date, datetime, timedelta, time as dtime
@@ -17,7 +17,8 @@ from ride import UserError, log
 HELP = """Commands:
 /today, /tomorrow: verdict per trip
 /date <day>: any day up to 7 ahead. <day> is today, tomorrow, a weekday (sat, monday, lunes), 2026-11-14 or 14/11
-/chart [day]: hourly graph of a day (default: the next day that matters)
+/week: one line per day for the next 7 days
+/chart [day]: hourly graph of a day (default: the next day that matters). /chart week: the 7 days in one chart
 /place [name, CC]: show or change the place, e.g. /place Leon, ES
 /trips [spec]: show or change your trips, e.g. /trips work 08:00-09:00 mon-fri; out 20:00-22:00
   /trips reset goes back to the server's RIDE_TRIPS, /trips none removes them
@@ -157,6 +158,19 @@ def chart_reply(rep):
         return Text(f"No chart available ({type(e).__name__}). Score per hour 00-23:\n{charts.sparkline(rep['rows'])}")
 
 
+def week_reports(state):
+    g = state.place()
+    return ride.week_reports(g, state.now().date(), state.sources(g), ride.parse_trips(state.trips_spec()))
+
+
+def week_chart_reply(reps):
+    try:
+        return Photo(charts.render_week(reps), f"{reps[0]['label']} · next {len(reps)} days")
+    except Exception as e:
+        log(f"week chart failed: {type(e).__name__}: {e}")
+        return Text(f"No chart available ({type(e).__name__}).\n" + "\n".join(ride.week_line(r) for r in reps))
+
+
 def report_reply(state, day):
     return Text(state.report(day)["text"] + ("" if state.trips_spec().strip().lower() not in ("", "none") else NO_TRIPS))
 
@@ -172,6 +186,11 @@ def handle(state, text):
             if cmd == "/date" and not arg:
                 return [Text("Which day? e.g. /date tomorrow, /date sat, /date 2026-11-14")]
             return [report_reply(state, parse_day(arg if cmd == "/date" else cmd[1:], state.now()))]
+        if cmd in ("/week", "/semana"):
+            reps = week_reports(state)
+            return [Text(f"Next {len(reps)} days · {reps[0]['label']}\n" + "\n".join(ride.week_line(r) for r in reps))]
+        if cmd == "/chart" and arg.lower() in ("week", "semana"):
+            return [week_chart_reply(week_reports(state))]
         if cmd == "/chart":
             now = state.now()
             return [chart_reply(state.report(parse_day(arg, now) if arg else ride.target_day(now)))]

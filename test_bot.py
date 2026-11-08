@@ -162,6 +162,14 @@ if have_mpl:
     assert plt.get_fignums() == [], "a failed render leaked its figure"
     charts._draw = real_draw
 
+# --- week: one line per day, and a week chart
+w = bot.handle(s, "/week")[0]
+assert isinstance(w, Text) and w.text.count("/100") + w.text.count("not enough data") == 7, w.text
+wc = bot.handle(s, "/chart week")[0]
+assert isinstance(wc, Photo if have_mpl else Text), wc
+if have_mpl:
+    assert wc.png[:8] == b"\x89PNG\r\n\x1a\n"
+
 # --- push timing: once per local day, also late, never before the time
 assert not bot.push_due(datetime(2026, 11, 9, 20, 59, tzinfo=tz), None, dtime(21, 0))
 assert bot.push_due(datetime(2026, 11, 9, 21, 0, tzinfo=tz), None, dtime(21, 0))

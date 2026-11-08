@@ -20,6 +20,8 @@ Gear: rain gear, strong wind, 54 km/h gusts
 |---|---|
 | `/today`, `/tomorrow` | The verdict for each of your trips on that day. |
 | `/date <day>` | The same for any day up to 7 days ahead. |
+| `/week` | One line per day for the next 7 days: score, verdict, best window, temperature, rain and gusts when they matter. |
+| `/chart week` | The same week as one chart: day score bars, temperature range, rain. |
 | `/chart [day]` | A graph of the hours: the score of each source and their median, temperature and rain, wind gusts, with your trips shaded. Without a day it uses tomorrow, or today if it is before noon. |
 | `/place [name, CC]` | Show or change the place, for example `/place Leon, ES`. Saved. |
 | `/trips [spec]` | Show or change your trips. Saved. `/trips reset` goes back to the server's `RIDE_TRIPS` and `/trips none` removes them. |

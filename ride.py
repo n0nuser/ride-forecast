@@ -402,6 +402,23 @@ def build_report(g, day, sources, trips):
     return dict(text="\n".join(lines), rows=rows, trips=ev, summary=summ, day=day, label=place_label(g))
 
 
+def week_line(rep):
+    """One line for a day in the week view: score, verdict, best window, temperature range, rain, gusts."""
+    d, summ = date.fromisoformat(rep["day"]), rep["summary"]
+    head = d.strftime("%a %d %b")
+    if not summ:
+        return f"{head}: not enough data yet"
+    rs = [r for r in rep["rows"] if r["hour"] in DAY_HOURS]
+    t, rain, gust = [r["w"].t for r in rs], max(r["w"].mm for r in rs), max((r["w"].gust or 0) for r in rs)
+    icon = "🟢" if summ["score"] >= BANDS[1][0] else "🟡" if summ["score"] >= BANDS[2][0] else "🔴"
+    return (f"{icon} {head}: {summ['score']}/100 {summ['verdict']}\n    best {summ['window']}, {min(t):.0f}-{max(t):.0f}°C"
+            + (f", rain {rain:.1f} mm/h" if rain >= RAIN_GEAR_MM else "") + (f", gusts {gust:.0f} km/h" if gust >= WIND_NOTE else ""))
+
+
+def week_reports(g, today, sources, trips, days=7):
+    return [build_report(g, (today + timedelta(days=i)).isoformat(), sources, trips) for i in range(days)]
+
+
 # ---- delivery ------------------------------------------------------------------------------
 
 def send(text, score=None):

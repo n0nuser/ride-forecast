@@ -74,3 +74,40 @@ def render(report):
         return buf.getvalue()
     finally:
         plt.close(fig)
+
+
+def render_week(reports):
+    """One chart for the week: day score bars coloured by verdict, temperature range, rain."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from datetime import date
+
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(9, 6), sharex=True, gridspec_kw={"height_ratios": [3, 2]})
+    try:
+        names = [date.fromisoformat(r["day"]).strftime("%a\n%d") for r in reports]
+        x = range(len(reports))
+        fig.suptitle(f"{reports[0]['label']} · next {len(reports)} days", fontsize=11)
+        sc = [(r["summary"] or {}).get("score", 0) for r in reports]
+        col = ["#2e9e5b" if v >= ride.BANDS[1][0] else "#e0a800" if v >= ride.BANDS[2][0] else "#d64545" for v in sc]
+        ax1.bar(x, sc, color=col, width=0.6)
+        for i, r in enumerate(reports):
+            ax1.text(i, sc[i] + 2, f"{sc[i]}" if r["summary"] else "n/a", ha="center", fontsize=9)
+        ax1.set_ylim(0, 110)
+        ax1.set_ylabel("day score")
+        rs = [[q for q in r["rows"] if q["hour"] in ride.DAY_HOURS] for r in reports]
+        ax2.vlines(x, [min([q["w"].t for q in d] or [0]) for d in rs], [max([q["w"].t for q in d] or [0]) for d in rs], color="#c0504d", lw=6)
+        ax2.set_ylabel("°C (08-20h)", color="#c0504d")
+        twin = ax2.twinx()
+        twin.bar([i + 0.25 for i in x], [max([q["w"].mm for q in d] or [0]) for d in rs], width=0.25, color="#4f81bd", alpha=0.8)
+        twin.set_ylabel("max rain mm/h", color="#4f81bd")
+        ax2.set_xticks(list(x))
+        ax2.set_xticklabels(names)
+        for ax in (ax1, ax2):
+            ax.grid(alpha=0.25)
+        fig.tight_layout(rect=(0, 0, 1, 0.96))
+        buf = io.BytesIO()
+        fig.savefig(buf, format="png", dpi=110)
+        return buf.getvalue()
+    finally:
+        plt.close(fig)
