@@ -5,14 +5,18 @@ A Telegram bot that tells you whether to ride your motorbike. It checks six weat
 The trips are yours. Nothing is built in: you tell the bot when you ride, and it judges those hours.
 
 ```
-Mon 09 Nov · Salamanca, Castille and León, ES
-🔴 work 07:30-09:00: STAY HOME, 13°C, 87% humidity, rain 0.2 mm at 08:00, sources disagree
-🟢 home 17:00-19:00: OK, 14 to 16°C, 70 to 76% humidity, gusts 51 km/h at 17:00
-Whole day 08:00-20:00: 59/100, Mixed: ride in the best window
-Best 3 hours: 17:00-20:00, 82/100
-Gear: rain gear, strong wind, 54 km/h gusts
-6 sources, SOURCES DISAGREE, low confidence: MET.no 86 · ECMWF 68 · MeteoFr 67 · ICON 66 · UKMO 60 · GFS 50
+Fri 13 Nov · Salamanca, Castille and León, ES
+🟢 Work 07:20-08:00: GO, 10°C, 88% humidity, gusts 46 km/h, light rain 0.1 mm/h at 07:00
+🟡 out 15:30-16:30: CAUTION, 13 to 14°C, 82% humidity, gusts 50 km/h, light rain 0.3 mm/h at 15:00, sources disagree
+Whole day 08:00-20:00: 🟢 GO, 80/100
+Best 3 hours: 09:00-12:00, 🟢 GO, 86/100
+Worst hour: 15:00, 🟡 CAUTION, gusts 50 km/h, light rain 0.3 mm/h
+Gear: rain gear, strong wind, 52 km/h gusts
+Ride: wet roads, brake early, 3 s gap, first minutes slippery; grip firmly, give trucks room on open roads
+6 sources, sources agree: ECMWF 84 · MeteoFr 84 · GFS 83 · ICON 76 · MET.no 72 · UKMO 71
 ```
+
+Every verdict is one of four levels: 🟢 GO, 🟡 CAUTION, 🟠 RISKY, 🔴 DON'T RIDE. The thresholds come from motorcycle safety sources (DGT, MSF, Met Office, AEMET, Michelin) and are documented in [docs/research](docs/research/motorcycle-weather-thresholds.md).
 
 ## What the bot does
 
@@ -20,9 +24,9 @@ Gear: rain gear, strong wind, 54 km/h gusts
 |---|---|
 | `/today`, `/tomorrow` | The verdict for each of your trips on that day. |
 | `/date <day>` | The same for any day up to 7 days ahead. |
-| `/week` | One line per day for the next 7 days: score, verdict, best window, temperature, rain and gusts when they matter. |
-| `/chart week` | The same week as one chart: day score bars, temperature range, rain. |
-| `/chart [day]` | A graph of the hours: the score of each source and their median, temperature and rain, wind gusts, with your trips shaded. Without a day it uses tomorrow, or today if it is before noon. |
+| `/week` | One line per day for the next 7 days: level and score, best window, temperature, and rain, gusts or fog when they matter. |
+| `/chart week` | The same week as one chart: day score bars coloured and labelled by level, temperature range, rain. |
+| `/chart [day]` | A graph of the hours: the score of each source and their median on the four level bands, temperature, rain, wind gusts and visibility, each with the lines where the level changes, and your trips shaded. Without a day it uses tomorrow, or today if it is before noon. |
 | `/place [name, CC]` | Show or change the place, for example `/place Leon, ES`. Saved. |
 | `/trips [spec]` | Show or change your trips. Saved. `/trips reset` goes back to the server's `RIDE_TRIPS` and `/trips none` removes them. |
 | `/help` | The list above. |
@@ -40,34 +44,52 @@ It looks up the place with the Open-Meteo geocoding API, then asks six sources f
 
 Weather apps disagree, so each source is scored on its own and the scores are combined. The five Open-Meteo models are different forecast models behind one API, which makes MET Norway the only fully independent source. Every hour is converted to the place's local time from the real instant, so the sources line up across daylight saving changes.
 
-### Hours
+### Levels
 
-Each hour gets a score from 0 to 100 for each source. Temperature, humidity and rain drive most of it:
+Every hour, for each source, gets one of four levels. The worst real hazard decides, and two CAUTION factors together make RISKY. Hazards are not added up as points: a drizzle at 13°C is not a reason to stay home.
 
-| Factor | Effect |
+| Factor | 🟢 GO (tip) | 🟡 CAUTION | 🟠 RISKY | 🔴 DON'T RIDE |
+|---|---|---|---|---|
+| Cold, dry | under 8°C: layers and gloves | 3°C or less | | 0°C or less |
+| Ice, damp (humidity 85% or more) or wet | | | 3°C or less | 1°C or less |
+| Rain | 0.1 to under 1 mm/h: wet roads | 1 mm/h | 4 mm/h | 15 mm/h |
+| Gusts | 40 km/h | 50 km/h | 60 km/h | 70 km/h |
+| Visibility | under 2000 m: mist | under 1000 m (fog) | under 200 m | under 100 m |
+| Heat | up to 32°C | above 32°C | 36°C and up | 40°C and up |
+| Thunderstorm, snow, freezing rain | | | | always |
+
+Where each number comes from, and which are judgment calls, is in [docs/research/motorcycle-weather-thresholds.md](docs/research/motorcycle-weather-thresholds.md). The thresholds are constants at the top of `ride.py`.
+
+Visibility comes from the Open-Meteo models that provide it (the lowest figure any source reports counts). MET Norway has none, so it only contributes a fog symbol.
+
+### Scores
+
+The 0-100 score is derived from the level, so a score always sits inside its level's band and the charts, texts and rankings agree:
+
+| Level | Score |
 |---|---|
-| Temperature | No penalty from 18 to 26 °C. Points are lost as it gets colder or hotter. |
-| Rain | Both the chance and the amount count. |
-| Ice | The cost grows as the air gets colder than 5 °C and damper than 70% humidity. Rain counts as fully wet. At 3 °C and 95% humidity it costs about 20 points on top of the cold. |
-| Humidity | Above 80% loses points on its own (mist, wet roads). Fog costs 20. |
-| Wind | Gusts over 40 km/h lose points. |
-| Dangerous hour | Scores 0: thunderstorm, snow, freezing rain, gusts of 70 km/h or more, and ice (2 °C or colder with rain or 90% humidity). |
+| 🟢 GO | 70 to 100 |
+| 🟡 CAUTION | 45 to 69 |
+| 🟠 RISKY | 20 to 44 |
+| 🔴 DON'T RIDE | 0 |
 
-The score of an hour is the median across sources. A dangerous hour counts when two or more sources report it. A single source reporting one is outvoted, but it still shows up in the chart. When the ice risk is meaningful, it is what the report names, ahead of plain cold.
+Inside a level, smaller costs (colder, damper, gustier, rain chance, poor visibility) order the hours. That is what picks the best 3-hour window.
+
+The score of an hour is the median across sources. A DON'T RIDE hour counts when two or more sources report it. A single source reporting one is outvoted, but it still shows up in the chart. Without such a vote the hour is never worse than RISKY. The reason shown for an hour is that of the source nearest the median.
 
 ### Trips
 
 A trip is a name, a time window and optionally the days it applies to. A trip is judged on its worst hour, because you can't choose when in the window you ride. One bad hour at 08:30 spoils the morning, whatever the afternoon does.
 
-| Trip result | Meaning |
-|---|---|
-| OK | The worst hour scores 70 or more. |
-| CAUTION | 45 to 69. |
-| STAY HOME | Below 45, or any dangerous hour. |
+The trip line shows the level, the temperature and humidity range of the trip, and the main factors of the worst hour with its time. If the sources are more than 30 points apart over the trip, the line says "sources disagree". That is a warning only: it does not lower the verdict. Trips only appear on their days.
 
-If the sources are more than 30 points apart over the trip, the score is lowered and the line says "sources disagree". Each line shows the temperature and humidity range of the trip, and names the single factor that drives the verdict with its hour. Trips only appear on their days.
+With no trips set, the bot shows the day line and tells you how to add trips. The `Whole day` line is always there:
 
-With no trips set, the bot shows the day line and tells you how to add trips. The `Whole day` line is always there: the day's score (the average of the hours 08:00-20:00, lifted toward the best window and lowered when sources disagree), the best 3-hour window, and a cap at "marginal" if any hour is dangerous. A gear line appears when it is cold, icy, wet, foggy or windy. The sources line counts only sources that cover the whole day.
+- The day's level and score: the average of the hours 08:00-20:00, lifted toward the best window but never above CAUTION, and capped at RISKY when any hour is DON'T RIDE.
+- The best 3-hour window with its own level.
+- The worst hour, when it is CAUTION or worse.
+- A `Gear` line when it is cold, icy, wet, foggy, windy or hot, and a `Ride` line with riding tips (wet roads, gusts, fog, cold tyres).
+- The sources line, which counts only sources that cover the whole day.
 
 The weights are judgment calls, not tuned values. They are constants at the top of `ride.py`.
 
@@ -201,7 +223,8 @@ sudo systemctl daemon-reload
 ## Limits
 
 - Forecasts are forecasts. The verdict is a rule of thumb, not a safety guarantee. Check the road, your gear and your own judgment. In particular, air temperature is not road temperature: bridges, shade and clear nights can freeze while the forecast says 3 °C.
-- It scores weather only. Daylight, traffic and road works are not in it, so it can suggest a window after sunset.
+- It scores weather only. Daylight, traffic and road works are not in it, so it can suggest a window after sunset. Wind direction is not in it either, so gusts count the same on sheltered and exposed roads.
+- Gust limits of 50 and 60 km/h and the heat limits are judgment calls: no authority publishes a motorcycle figure. A light bike deserves lower limits.
 - Beyond 2 or 3 days only some sources have hourly data, so the report says how many sources it used. Treat the later days as a rough guide.
 - Only MET Norway is independent of the Open-Meteo API. Adding more providers is a small change in `ride.py`.
 - The bot serves one chat and one place at a time.
@@ -210,7 +233,7 @@ sudo systemctl daemon-reload
 ## Tests
 
 ```
-python3 test_ride.py     # scoring, ice, trips, stop rules, DST, retries, deadlines, real API captures
+python3 test_ride.py     # levels and thresholds, score bands, ice, visibility, trips, stop rules, DST, retries, deadlines, real API captures
 python3 test_bot.py      # commands, dates, state, charts, the push, the watchdog, a stub Telegram API
 ```
 

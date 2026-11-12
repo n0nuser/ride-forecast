@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """Motorbike weather verdicts from several sources, no API keys. Core library + one-shot CLI.
 Sources: 5 Open-Meteo models (ECMWF, GFS, ICON, Meteo-France, UK Met Office) + MET Norway.
-Every source is scored per hour; an hour's score is the median across sources. Trips (your
-commute windows) are judged on their worst hour; a dangerous hour reported by 2+ sources is a stop.
+Every source is rated per hour on four levels (GO, CAUTION, RISKY, DON'T RIDE): the worst real hazard wins
+(ice, rain, gusts, fog/visibility, heat, storm), and two CAUTION factors make RISKY. A 0-100 score is derived from the
+level, so verdicts, charts and rankings always agree. An hour's score is the median across sources; trips are judged
+on their worst hour; a DON'T RIDE hour reported by 2+ sources is a stop. Thresholds and their sources: docs/research/.
 Usage: ride.py "Salamanca" [--country ES] [--date YYYY-MM-DD] [--dry]
 Env:   RIDE_PLACE, RIDE_COUNTRY, RIDE_TRIPS, WEBHOOK_URL, TELEGRAM_TOKEN, TELEGRAM_CHAT_ID
 Target day: before 12:00 local = today, after = tomorrow. The Telegram bot is in bot.py.
@@ -26,19 +28,26 @@ RETRIES = (1, 3)  # s waits between attempts
 UA = {"User-Agent": "ride-forecast/2.0 github.com/n0nuser/ride-forecast"}  # MET Norway requires an identifying UA
 MODELS = {"ecmwf_ifs025": "ECMWF", "gfs_seamless": "GFS", "icon_seamless": "ICON",
           "meteofrance_seamless": "MeteoFr", "ukmo_seamless": "UKMO"}
-VARS = ["temperature_2m", "relative_humidity_2m", "precipitation_probability", "precipitation", "wind_gusts_10m", "weather_code"]
-BANDS = [(80, "Great day to ride"), (65, "Good day, ride"), (50, "Mixed: ride in the best window"),
-         (35, "Marginal: short ride only if you must"), (0, "Stay home")]
-TRIP_BANDS = [(70, "OK"), (45, "CAUTION"), (0, "STAY HOME")]
-ICONS = {"OK": "🟢", "CAUTION": "🟡", "STAY HOME": "🔴"}
-MIXED_MAX = BANDS[1][0] - 1  # a good window rescues a mediocre day, never above "mixed"
-STOP_CAP = BANDS[2][0] - 1   # any dangerous hour caps the day at "marginal"
-SPREAD_LIMIT, SPREAD_DIVISOR = 30, 5  # sources this far apart (points) lower the score by spread/5
+VARS = ["temperature_2m", "relative_humidity_2m", "precipitation_probability", "precipitation", "wind_gusts_10m",
+        "weather_code", "visibility"]  # same order as Hour's fields
+# One scale for everything: name, icon, lowest score of the level. An hour's 0-100 score is kept inside its level's band.
+LEVELS = [("GO", "🟢", 70), ("CAUTION", "🟡", 45), ("RISKY", "🟠", 20), ("DON'T RIDE", "🔴", 0)]
+STOP = len(LEVELS) - 1
+STOP_CAP = LEVELS[1][2] - 1    # any DON'T RIDE hour in the day caps the day at RISKY
+MIXED_MAX = LEVELS[0][2] - 1   # a good window rescues a mediocre day, never above CAUTION
+SPREAD_LIMIT = 30  # sources this far apart (points): the report says "sources disagree"
 AGREE_SPREAD = 15  # up to this, the day line says "sources agree"
 STORM, SNOW_ICE, FOG = (95, 96, 99), (56, 57, 66, 67, 71, 73, 75, 77, 85, 86), (45, 48)
-GUST_FROM, GUST_STOP = 40, 70  # km/h: points are lost above the first, the hour is a stop at the second
-ICE_STOP_T = 2   # deg C: at or below this, wet or damp air is a stop
-ICE_SOFT_T = 5   # deg C: below this, damp or wet air starts to cost points (frost on bridges and shade)
+# Thresholds (sources and judgment calls: docs/research/motorcycle-weather-thresholds.md)
+ICE_DAMP_RH = 85            # %: at or above this the road counts as damp for ice
+ICE_DRY_STOP_T, ICE_WET_STOP_T, FROST_T = 0, 1, 3  # deg C: <=0 DON'T RIDE; <=1 and damp too; <=3 and damp RISKY, dry CAUTION
+RAIN_LEVELS = (1, 4, 15)    # mm/h: from CAUTION, RISKY, DON'T RIDE (Met Office: 4 is heavy; AEMET: 15 is a yellow warning)
+GUST_FROM = 40              # km/h: worth a tip
+GUST_LEVELS = (50, 60, 70)  # km/h: CAUTION, RISKY, DON'T RIDE (70 = AEMET yellow gust warning; 50 and 60 are judgment)
+VIS_LEVELS = (1000, 200, 100)  # m: below these CAUTION (fog), RISKY, DON'T RIDE (100 m: UK fog-light limit)
+VIS_NOTE = 2000             # m: below this a tip ("mist")
+HEAT_LEVELS = (32, 36, 40)  # deg C: above 32 CAUTION, from 36 RISKY, from 40 DON'T RIDE (judgment)
+ICE_SOFT_T = 5   # deg C: below this, damp or wet air starts to cost score points (frost on bridges and shade)
 ICE_WET_FROM, ICE_WET_FULL = 70, 95  # % humidity where the moisture factor starts and reaches 1
 ICE_MAX_PENALTY, ICE_NOTE = 50, 0.3  # points at full risk; risk above which the gear line warns
 GUST_FACTOR = 1.5  # ponytail: MET Norway has no gusts; gust ~ 1.5 x mean wind. Crude, tune if it matters.
@@ -62,6 +71,7 @@ class Hour(NamedTuple):
     mm: float
     gust: Optional[float]  # km/h, None if the source has none
     code: int              # WMO weather code
+    vis: Optional[float] = None  # visibility in metres, None if the source has none
 
 
 # ---- plumbing ------------------------------------------------------------------------------
@@ -129,54 +139,104 @@ def _clamp(x):
     return max(0.0, min(1.0, x))
 
 
+def level_of(score):
+    """Score (0-100) -> level index 0 (GO) .. 3 (DON'T RIDE). The one place a score becomes a verdict."""
+    return next(i for i, (_, _, lo) in enumerate(LEVELS) if score >= lo)
+
+
 def ice_risk(h):
     """0 to 1: cold enough for frost and damp or wet enough to form it. Rain counts as fully wet."""
     wet = 1.0 if h.mm >= 0.1 else _clamp((h.rh - ICE_WET_FROM) / (ICE_WET_FULL - ICE_WET_FROM))
     return _clamp((ICE_SOFT_T - h.t) / ICE_SOFT_T) * wet
 
 
+def _step(value, limits):
+    """How many of the ascending limits value has reached (0 to len)."""
+    return sum(value >= x for x in limits)
+
+
+PRIORITY = ("storm", "snow", "ice", "wind", "rain", "fog", "heat", "cold")  # the order ties are named in
+CATEGORY = {"storm": "thunderstorm", "snow": "snow or freezing rain", "ice": "ice risk", "wind": "gusts",
+            "rain": "heavy rain", "fog": "poor visibility", "heat": "extreme heat"}
+
+
+def hazards(h):
+    """[(level, key)] for one hour of one source, worst first. Level 0 is a tip only; 3 is DON'T RIDE."""
+    out = []
+    wet = h.mm >= 0.1 or h.rh >= ICE_DAMP_RH
+    if h.code in STORM:
+        out.append((3, "storm"))
+    if h.code in SNOW_ICE:
+        out.append((3, "snow"))
+    if h.t <= ICE_DRY_STOP_T or (h.t <= ICE_WET_STOP_T and wet):
+        out.append((3, "ice"))
+    elif h.t <= FROST_T:
+        out.append((2, "ice") if wet else (1, "cold"))
+    elif h.t < COLD_GEAR:
+        out.append((0, "cold"))
+    if h.mm >= 0.1:
+        out.append((_step(h.mm, RAIN_LEVELS), "rain"))
+    if h.gust is not None and h.gust >= GUST_FROM:
+        out.append((_step(h.gust, GUST_LEVELS), "wind"))
+    fog = 1 if h.code in FOG else 0
+    if h.vis is not None:
+        fog = max(fog, sum(h.vis < x for x in VIS_LEVELS))
+        if fog or h.vis < VIS_NOTE:
+            out.append((fog, "fog"))
+    elif fog:
+        out.append((fog, "fog"))
+    if h.t > HEAT_LEVELS[0]:
+        out.append((1 + (h.t >= HEAT_LEVELS[1]) + (h.t >= HEAT_LEVELS[2]), "heat"))
+    return sorted(out, key=lambda x: (-x[0], PRIORITY.index(x[1])))
+
+
+def level(h):
+    """One hour of one source: the worst hazard's level; two CAUTION factors together make RISKY."""
+    hz = hazards(h)
+    lv = hz[0][0] if hz else 0
+    return 2 if lv == 1 and sum(l == 1 for l, _ in hz) >= 2 else lv
+
+
 def stop_reason(h):
     """Category of danger that makes this hour not rideable at all, or None."""
-    if h.code in STORM:
-        return "thunderstorm"
-    if h.code in SNOW_ICE:
-        return "snow or freezing rain"
-    if h.gust is not None and h.gust >= GUST_STOP:
-        return "gusts"
-    if h.t <= ICE_STOP_T and (h.mm >= 0.1 or h.rh >= 90):
-        return "ice risk"
-    return None
+    return next((CATEGORY[k] for l, k in hazards(h) if l == STOP), None)
+
+
+def reason_text(key, lv, h):
+    return {"storm": "thunderstorm", "snow": "snow or freezing rain",
+            "ice": f"{'ice' if lv == STOP else 'frost'} risk ({h.t:.0f}°C, {h.rh:.0f}% humidity)",
+            "cold": f"cold {h.t:.0f}°C", "wind": f"gusts {h.gust or 0:.0f} km/h", "heat": f"hot {h.t:.0f}°C",
+            "rain": f"{'light rain' if lv == 0 else 'rain'} {h.mm:.1f} mm/h",
+            "fog": ("fog" if lv else "mist") + (f", visibility {h.vis:.0f} m" if h.vis is not None else "")}[key]
 
 
 def describe_stop(h, category):
-    return {"gusts": f"gusts {h.gust or 0:.0f} km/h", "ice risk": f"ice risk ({h.t:.0f}°C, {h.rh:.0f}% humidity)"}.get(category, category)
+    key = next(k for k, c in CATEGORY.items() if c == category)
+    return reason_text(key, STOP, h)
 
 
 def penalties(h):
+    """Soft costs: they order hours inside a level. The level itself comes from hazards()."""
     pop = h.pop if h.pop is not None else min(90, h.mm * 150)  # no rain chance from the source: infer, smoothly
-    return {"cold": min(60, max(0, 18 - h.t) * 3), "hot": min(60, max(0, h.t - 26) * 4),
+    return {"cold": min(60, max(0, 18 - h.t) * 3), "hot": min(60, max(0, h.t - HEAT_LEVELS[0]) * 4),
             "rain": min(70, pop * 0.35 + h.mm * 40), "wind": min(30, max(0, (h.gust or 0) - GUST_FROM) * 1.5),
             "damp": min(15, max(0, h.rh - 80) * 0.75), "fog": 20 if h.code in FOG else 0,
+            "vis": 0 if h.vis is None else min(30, max(0, 4000 - h.vis) / 4000 * 30),
             "ice": ICE_MAX_PENALTY * ice_risk(h)}
 
 
 def hour_score(h):
-    """100 = perfect; each factor subtracts; a stop reason is 0."""
-    return 0 if stop_reason(h) else max(0, round(100 - sum(penalties(h).values())))
+    """0-100, always inside the band of the hour's level (GO 70-100 ... RISKY 20-44), DON'T RIDE is 0."""
+    lv = level(h)
+    if lv == STOP:
+        return 0
+    lo, hi = LEVELS[lv][2], LEVELS[lv - 1][2] - 1 if lv else 100
+    return round(lo + (hi - lo) * max(0, 100 - sum(penalties(h).values())) / 100)  # soft costs order hours inside the band
 
 
-def main_reason(h):
-    """The factor that costs this hour the most, in words."""
-    if r := stop_reason(h):
-        return describe_stop(h, r)
-    if ice_risk(h) >= ICE_NOTE:  # the hazard the rider cares most about wins over a bigger "cold" cost
-        return f"frost risk ({h.t:.0f}°C, {h.rh:.0f}% humidity)"
-    k, v = max(penalties(h).items(), key=lambda kv: kv[1])
-    if v < 8:
-        return "fine"
-    return {"cold": f"cold {h.t:.0f}°C", "hot": f"hot {h.t:.0f}°C", "wind": f"gusts {h.gust or 0:.0f} km/h",
-            "damp": f"damp {h.rh:.0f}%", "fog": "fog", "ice": f"frost risk ({h.t:.0f}°C, {h.rh:.0f}% humidity)",
-            "rain": f"rain {h.mm:.1f} mm" if h.mm >= 0.1 else f"{h.pop or 0:.0f}% rain chance"}[k]
+def main_reason(h, n=2):
+    """The factors that matter for this hour (worst first, at most n), in words."""
+    return ", ".join(reason_text(k, l, h) for l, k in hazards(h)[:n]) or "fine"
 
 
 # ---- fetching ------------------------------------------------------------------------------
@@ -204,7 +264,8 @@ def open_meteo(g):
     for m, name in MODELS.items():
         if f"temperature_2m_{m}" not in h:
             continue
-        rows = {keys[i]: Hour(*(h[f"{v}_{m}"][i] for v in VARS)) for i in range(len(keys))}
+        col = {v: h.get(f"{v}_{m}") or [None] * len(keys) for v in VARS}  # visibility may be missing for a model
+        rows = {keys[i]: Hour(*(col[v][i] for v in VARS)) for i in range(len(keys))}
         out[name] = {k: x for k, x in rows.items() if valid(x)}
     return {n: s for n, s in out.items() if s}
 
@@ -297,12 +358,16 @@ def _row(hr, items):
     per = {n: hour_score(h) for n, h in items.items()}
     hs = list(items.values())
     votes = [r for h in hs if (r := stop_reason(h))]
-    pops, gusts = [h.pop for h in hs if h.pop is not None], [h.gust for h in hs if h.gust is not None]
+    pops, gusts, viss = ([x for h in hs if (x := getattr(h, f)) is not None] for f in ("pop", "gust", "vis"))
     cons = Hour(st.median(h.t for h in hs), st.median(h.rh for h in hs), max(pops) if pops else None,
-                st.median(h.mm for h in hs), max(gusts) if gusts else None, Counter(h.code for h in hs).most_common(1)[0][0])
+                st.median(h.mm for h in hs), max(gusts) if gusts else None, Counter(h.code for h in hs).most_common(1)[0][0],
+                min(viss) if viss else None)  # the worst visibility any source sees
     stop = Counter(votes).most_common(1)[0][0] if len(votes) >= min(2, len(hs)) else None  # 2 sources agree
-    return dict(hour=hr, score=0 if stop else st.median(per.values()), stop=stop, per=per, w=cons, n=len(hs),
-                reason=describe_stop(cons, stop) if stop else main_reason(cons))
+    med = st.median(per.values())
+    ref = min(per, key=lambda n: (abs(per[n] - med), per[n]))  # the source nearest the median explains the hour
+    score = 0 if stop else max(LEVELS[STOP - 1][2], med)  # without a stop vote the hour stays at RISKY or better
+    return dict(hour=hr, score=score, level=STOP if stop else level_of(score), stop=stop, per=per, w=cons, n=len(hs),
+                reason=describe_stop(cons, stop) if stop else main_reason(items[ref]))
 
 
 def hourly_rows(sources, day):
@@ -328,11 +393,11 @@ def eval_trip(t, by_hour):
         return None
     worst = min(rows, key=lambda r: r["score"])
     spread = max(max(r["per"].values()) - min(r["per"].values()) for r in rows)
-    score = max(0, worst["score"] - (round(spread / SPREAD_DIVISOR) if spread > SPREAD_LIMIT else 0))
     stop = next((r for r in rows if r["stop"]), None)
-    verdict = "STAY HOME" if stop else next(v for m, v in TRIP_BANDS if score >= m)
+    score = worst["score"]
+    lv = STOP if stop else level_of(score)
     where = stop or worst
-    return dict(name=t["name"], window=trip_window(t), score=score, verdict=verdict, spread=spread,
+    return dict(name=t["name"], window=trip_window(t), score=score, level=lv, verdict=LEVELS[lv][0], spread=spread,
                 temp=_rng(min(r["w"].t for r in rows), max(r["w"].t for r in rows), "°C"),
                 humidity=_rng(min(r["w"].rh for r in rows), max(r["w"].rh for r in rows), "%"),
                 reason="fine" if where["reason"] == "fine" else f"{where['reason']} at {where['hour']:02d}:00",
@@ -340,7 +405,7 @@ def eval_trip(t, by_hour):
 
 
 def day_summary(rows):
-    """The whole-day view over DAY_HOURS: average, best window, disagreement, stop cap. Only full-coverage sources count."""
+    """The whole-day view over DAY_HOURS: average, best window, worst hour, stop cap. Only full-coverage sources count."""
     rs = [r for r in rows if r["hour"] in DAY_HOURS]
     if len(rs) < WINDOW_HOURS:
         return None
@@ -352,13 +417,13 @@ def day_summary(rows):
     day_scores = {n: round(st.mean(r["per"][n] for r in rs if n in r["per"])) for n in names}
     spread = max(day_scores.values()) - min(day_scores.values())
     score = max(avg, min(win - 15, MIXED_MAX))
-    if spread > SPREAD_LIMIT:
-        score = max(0, score - round(spread / SPREAD_DIVISOR))
     if any(r["stop"] for r in rs):
         score = min(score, STOP_CAP)
-    start = rs[best]["hour"]
-    return dict(score=score, verdict=next(v for m, v in BANDS if score >= m), window=f"{start:02d}:00-{start + WINDOW_HOURS:02d}:00",
-                window_score=win, day_scores=day_scores, spread=spread)
+    start, worst = rs[best]["hour"], min(rs, key=lambda r: (r["level"] < STOP, r["score"]))
+    lv = level_of(score)
+    return dict(score=score, level=lv, verdict=LEVELS[lv][0], window=f"{start:02d}:00-{start + WINDOW_HOURS:02d}:00",
+                window_score=win, window_level=level_of(win), day_scores=day_scores, spread=spread,
+                worst=worst if worst["level"] > 0 else None)
 
 
 def target_day(now):
@@ -373,8 +438,18 @@ def _gear(rows):
     return ([f"warm layers and gloves ({cold:.0f}°C)"] if cold < COLD_GEAR else []) \
         + (["watch for ice on bridges and in shade"] if any(ice_risk(r["w"]) >= ICE_NOTE for r in rows) else []) \
         + (["rain gear"] if any(r["w"].mm >= RAIN_GEAR_MM for r in rows) else []) \
-        + (["clear visor, fog"] if any(r["w"].code in FOG for r in rows) else []) \
-        + ([f"strong wind, {max(r['w'].gust or 0 for r in rows):.0f} km/h gusts"] if any((r["w"].gust or 0) >= WIND_NOTE for r in rows) else [])
+        + (["clear visor, fog"] if any(r["w"].code in FOG or (r["w"].vis is not None and r["w"].vis < VIS_LEVELS[0]) for r in rows) else []) \
+        + ([f"strong wind, {max(r['w'].gust or 0 for r in rows):.0f} km/h gusts"] if any((r["w"].gust or 0) >= WIND_NOTE for r in rows) else []) \
+        + ([f"hot, vented gear and water ({max(r['w'].t for r in rows):.0f}°C)"] if any(r["w"].t > HEAT_LEVELS[0] for r in rows) else [])
+
+
+TIPS = {"rain": "wet roads, brake early, 3 s gap, first minutes slippery", "wind": "grip firmly, give trucks room on open roads",
+        "fog": "lights on, slow down, stop within what you see", "cold": "cold tyres, gentle first km"}
+
+
+def _tips(rows):
+    keys = {k for r in rows for _, k in hazards(r["w"])}
+    return [t for k, t in TIPS.items() if k in keys]
 
 
 def build_report(g, day, sources, trips):
@@ -386,12 +461,18 @@ def build_report(g, day, sources, trips):
     summ = day_summary(rows)
     lines = [f"{d.strftime('%a %d %b')} · {place_label(g)}"]
     for e in ev:
-        lines.append(f"{ICONS[e['verdict']]} {e['name']} {e['window']}: {e['verdict']}, {e['temp']}, {e['humidity']} humidity, {e['reason']}"
+        lines.append(f"{LEVELS[e['level']][1]} {e['name']} {e['window']}: {e['verdict']}, {e['temp']}, {e['humidity']} humidity, {e['reason']}"
                      + (", sources disagree" if e["spread"] > SPREAD_LIMIT else ""))
     if summ:
-        lines.append(f"Whole day 08:00-20:00: {summ['score']}/100, {summ['verdict']}\nBest 3 hours: {summ['window']}, {summ['window_score']}/100")
-    if gear := _gear([by_hour[h] for e in ev for h in e["hours"]] or [r for r in rows if r["hour"] in DAY_HOURS]):
+        lines.append(f"Whole day 08:00-20:00: {LEVELS[summ['level']][1]} {summ['verdict']}, {summ['score']}/100\n"
+                     f"Best 3 hours: {summ['window']}, {LEVELS[summ['window_level']][1]} {LEVELS[summ['window_level']][0]}, {summ['window_score']}/100")
+        if w := summ["worst"]:
+            lines.append(f"Worst hour: {w['hour']:02d}:00, {LEVELS[w['level']][1]} {LEVELS[w['level']][0]}, {w['reason']}")
+    used = [by_hour[h] for e in ev for h in e["hours"]] or [r for r in rows if r["hour"] in DAY_HOURS]
+    if gear := _gear(used):
         lines.append("Gear: " + ", ".join(gear))
+    if tips := _tips(used):
+        lines.append("Ride: " + "; ".join(tips))
     if summ:
         sc = summ["day_scores"]
         agree = ("ONLY 1 source, low confidence" if len(sc) == 1 else "sources agree" if summ["spread"] <= AGREE_SPREAD
@@ -403,16 +484,17 @@ def build_report(g, day, sources, trips):
 
 
 def week_line(rep):
-    """One line for a day in the week view: score, verdict, best window, temperature range, rain, gusts."""
+    """One line for a day in the week view: level and score, best window, temperature range, rain, gusts, visibility."""
     d, summ = date.fromisoformat(rep["day"]), rep["summary"]
     head = d.strftime("%a %d %b")
     if not summ:
         return f"{head}: not enough data yet"
     rs = [r for r in rep["rows"] if r["hour"] in DAY_HOURS]
     t, rain, gust = [r["w"].t for r in rs], max(r["w"].mm for r in rs), max((r["w"].gust or 0) for r in rs)
-    icon = "🟢" if summ["score"] >= BANDS[1][0] else "🟡" if summ["score"] >= BANDS[2][0] else "🔴"
-    return (f"{icon} {head}: {summ['score']}/100 {summ['verdict']}\n    best {summ['window']}, {min(t):.0f}-{max(t):.0f}°C"
-            + (f", rain {rain:.1f} mm/h" if rain >= RAIN_GEAR_MM else "") + (f", gusts {gust:.0f} km/h" if gust >= WIND_NOTE else ""))
+    vis = min((r["w"].vis for r in rs if r["w"].vis is not None), default=None)
+    return (f"{LEVELS[summ['level']][1]} {head}: {summ['verdict']} {summ['score']}/100\n    best {summ['window']}, {min(t):.0f}-{max(t):.0f}°C"
+            + (f", rain {rain:.1f} mm/h" if rain >= RAIN_GEAR_MM else "") + (f", gusts {gust:.0f} km/h" if gust >= WIND_NOTE else "")
+            + (f", visibility {vis:.0f} m" if vis is not None and vis < VIS_LEVELS[0] else ""))
 
 
 def week_reports(g, today, sources, trips, days=7):

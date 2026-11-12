@@ -3,7 +3,7 @@ from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 import ride
-from ride import Hour, hour_score, stop_reason, target_day, main, parse_trips, trip_hours, hourly_rows, eval_trip, day_summary, build_report
+from ride import Hour, hour_score, stop_reason, level, level_of, target_day, main, parse_trips, trip_hours, hourly_rows, eval_trip, day_summary, build_report
 
 FIX = Path(__file__).parent / "tests" / "fixtures"
 OK = Hour(22, 50, 0, 0.0, 10, 0)
@@ -14,6 +14,7 @@ with_hours = lambda src, hours, day=DAY, **kw: {**src, **{f"{day}T{h:02d}:00": O
 TRIPS = parse_trips("work 07:30-09:00 mon-fri;home 17:00-19:00 mon-fri;out 20:00-23:00")   # test data, not a default
 REAL_GET, REAL_SLEEP, REAL_URLOPEN = ride.get, time.sleep, ride.urllib.request.urlopen
 quiet = lambda: contextlib.redirect_stderr(io.StringIO())
+LEVEL_NAME = lambda score: ride.LEVELS[level_of(score)][0]
 
 # --- trips are personal: nothing built in
 assert not hasattr(ride, "DEFAULT_TRIPS")
@@ -23,36 +24,68 @@ os.environ["RIDE_TRIPS"] = "gym 18:00-19:00 tue"
 assert ride.trips_from_env()[0]["name"] == "gym"
 os.environ.pop("RIDE_TRIPS")
 
-# --- hour_score: graded, with hard stops
-assert hour_score(OK) == 100
-assert hour_score(OK._replace(pop=90, mm=3, code=61)) < 35                 # rain
-assert hour_score(OK._replace(code=95)) == 0                               # thunderstorm
-assert hour_score(OK._replace(gust=100)) == 0 and hour_score(OK._replace(gust=69)) > 0   # gust stop at 70
-assert 40 < hour_score(OK._replace(t=30, pop=10, gust=35)) < 90            # hot: degraded, not binary
+# --- hour_score: the worst hazard sets the level, the score stays inside that level's band, DON'T RIDE is 0
+assert hour_score(OK) == 100 and level(OK) == 0
+assert level(OK._replace(pop=90, mm=3, code=61)) == 1 and 45 <= hour_score(OK._replace(pop=90, mm=3, code=61)) <= 69   # rain
+assert hour_score(OK._replace(code=95)) == 0 and stop_reason(OK._replace(code=95)) == "thunderstorm"
+assert hour_score(OK._replace(gust=100)) == 0 and 20 <= hour_score(OK._replace(gust=69)) <= 44   # gust stop at 70
+assert 70 <= hour_score(OK._replace(t=30, pop=10, gust=35)) < 100         # 30 C is tolerable: GO, a little lower
 assert hour_score(OK._replace(pop=None, gust=None)) == 100                 # source without pop/gust
-assert hour_score(OK._replace(pop=None, mm=0.5)) < 60                      # steady rain, no pop: not "good"
+assert level(OK._replace(pop=None, mm=0.5)) == 0 and hour_score(OK._replace(pop=None, mm=0.5)) < hour_score(OK._replace(pop=None, mm=0.1))
 a, b = hour_score(OK._replace(pop=None, mm=0.29)), hour_score(OK._replace(pop=None, mm=0.30))
 assert abs(a - b) <= 3, (a, b)                                             # no cliff at 0.3 mm
-assert hour_score(OK._replace(code=45)) == 80                              # fog costs 20
+assert level(OK._replace(code=45)) == 1 and 45 <= hour_score(OK._replace(code=45)) <= 69   # fog, no visibility figure
 assert stop_reason(OK) is None and stop_reason(OK._replace(code=71)) == "snow or freezing rain"
 assert ride.main_reason(OK) == "fine" and "cold" in ride.main_reason(OK._replace(t=4, rh=40)) and "gusts" in ride.main_reason(OK._replace(gust=60))
 
-# --- ice: cold plus damp or wet. A hard stop at 2 C, a graded cost up to 5 C, nothing when dry or mild
-for t, rh in ((2, 90), (0, 95), (-3, 92), (1, 60)):
-    assert hour_score(OK._replace(t=t, rh=rh, mm=0.1 if rh < 90 else 0)) == 0, (t, rh)
-assert stop_reason(OK._replace(t=2, rh=89)) is None and stop_reason(OK._replace(t=2, rh=89, mm=0.1)) == "ice risk"
+# --- the complaint that started this: 13 C, 0.3 mm of rain and 48 km/h gusts is a GO with tips, not STAY HOME
+mild = Hour(13, 84, 80, 0.3, 48, 0)
+assert level(mild) == 0 and hour_score(mild) >= 70 and ride.main_reason(mild) == "gusts 48 km/h, light rain 0.3 mm/h"
+assert level(Hour(10, 91, 20, 0, 20, 0)) == 0                              # 10 C and damp: GO, dress warm
+
+# --- every threshold: the first value at each level
+at = lambda **kw: level(OK._replace(**kw))
+assert [at(mm=m) for m in (0.05, 0.9, 1, 3.9, 4, 14.9, 15)] == [0, 0, 1, 1, 2, 2, 3]                  # rain mm/h
+assert [at(gust=g) for g in (39, 49, 50, 59, 60, 69, 70)] == [0, 0, 1, 1, 2, 2, 3]                    # gusts km/h
+assert [at(t=t) for t in (32, 33, 35.9, 36, 39.9, 40)] == [0, 1, 1, 2, 2, 3]                           # heat: 32 is tolerable
+assert [at(vis=v) for v in (5000, 1500, 999, 200, 199, 100, 99)] == [0, 0, 1, 1, 2, 2, 3]            # visibility m
+assert [at(t=t, rh=50) for t in (8, 4, 3, 1, 0, -2)] == [0, 0, 1, 1, 3, 3]                           # dry cold: CAUTION from 3 C, ice at 0
+assert [at(t=t, rh=90) for t in (4, 3, 2, 1, 0)] == [0, 2, 2, 3, 3]                                  # damp cold: RISKY at 3 C, ice at 1 C
+assert at(t=3, rh=84) == 1 and at(t=3, rh=85) == 2 and at(t=1, rh=84) == 1 and at(t=1, rh=85) == 3  # damp from 85% humidity
+assert at(t=3, rh=50, mm=0.1) == 2 and at(t=1, rh=50, mm=0.1) == 3     # rain makes it wet
+assert at(mm=2, gust=55) == 2 and at(mm=2) == 1 and at(mm=2, gust=45) == 1 and at(t=34, code=45) == 2   # two CAUTION factors: RISKY
+assert at(mm=2, gust=65) == 2 and at(mm=2, gust=75) == 3                    # the worst factor still decides
+assert at(code=95) == 3 and at(code=71) == 3 and at(code=95, mm=0.2) == 3
+assert ride.main_reason(OK._replace(vis=1500)) == "mist, visibility 1500 m" and ride.main_reason(OK._replace(vis=150)) == "fog, visibility 150 m"
+assert at(vis=None) == 0 and at(vis=1500, code=45) == 1                    # a fog code counts even where visibility looks fine
+# score and level can never disagree: sweep a grid of weather
+for t in (-3, 0, 1, 3, 4, 7, 15, 33, 37, 41):
+    for rh in (40, 90):
+        for mm in (0, 0.3, 2, 6, 20):
+            for gust in (None, 20, 45, 55, 65, 75):
+                for vis in (None, 5000, 800, 150, 60):
+                    for code in (0, 45):
+                        h = Hour(t, rh, 50, mm, gust, code, vis)
+                        assert level_of(hour_score(h)) == level(h), h
+assert hour_score(OK._replace(t=4)) > hour_score(OK._replace(t=4, rh=95)) > hour_score(OK._replace(t=4, rh=95, gust=48))   # inside a level the soft costs still order hours
+
+# --- ice: cold plus damp or wet. DON'T RIDE at 0 C, or 1 C when damp; RISKY at 3 C when damp; graded cost up to 5 C
+for t, rh, mm in ((0, 50, 0), (-3, 92, 0), (1, 85, 0), (1, 60, 0.1)):
+    assert hour_score(OK._replace(t=t, rh=rh, mm=mm)) == 0, (t, rh)
+assert stop_reason(OK._replace(t=1, rh=84)) is None and stop_reason(OK._replace(t=1, rh=84, mm=0.1)) == "ice risk"
 assert ride.describe_stop(OK._replace(t=1, rh=93), "ice risk") == "ice risk (1°C, 93% humidity)"
 damp, dry = hour_score(OK._replace(t=4, rh=90)), hour_score(OK._replace(t=4, rh=40))
-assert dry - damp >= 15, (dry, damp)                                       # same cold, damp costs a lot more
+assert dry > damp                                                          # same cold, damp costs more
 assert hour_score(OK._replace(t=4, rh=60)) == dry                          # humidity below 70% is no ice concern
 assert hour_score(OK._replace(t=4, mm=0.3)) < hour_score(OK._replace(t=4, rh=90, mm=0)) <= hour_score(OK._replace(t=4, rh=80))   # rain is full moisture
 assert ride.ice_risk(OK._replace(t=6, rh=100)) == 0 and ride.ice_risk(OK._replace(t=20, mm=2)) == 0   # mild: no frost whatever the humidity
 assert 0 < ride.ice_risk(OK._replace(t=3, rh=85)) < ride.ice_risk(OK._replace(t=1, rh=85)) < ride.ice_risk(OK._replace(t=1, rh=95))
 assert "frost risk (3°C, 95% humidity)" in ride.main_reason(OK._replace(t=3, rh=95))
-assert ride.main_reason(OK._replace(t=4, rh=95)).startswith("cold")   # risk 0.2: not yet worth naming
-frost = day_of(t=3, rh=92)   # not a stop, but the trip lines and the gear line say so
+assert ride.main_reason(OK._replace(t=4, rh=95)).startswith("cold")   # a tip, not frost
+frost = day_of(t=3, rh=92)   # RISKY: the trip lines, the gear line and the verdict say so
 rep = build_report(G, DAY, {"a": frost, "b": frost}, TRIPS)
 assert "92% humidity" in rep["text"] and "watch for ice on bridges and in shade" in rep["text"] and "warm layers and gloves (3°C)" in rep["text"]
+assert rep["trips"][0]["verdict"] == "RISKY" and "🟠 work 07:30-09:00: RISKY" in rep["text"]
 assert "ice" not in build_report(G, DAY, {"a": day_of(t=4, rh=50)}, TRIPS)["text"]
 
 # --- trips: parsing and hours
@@ -73,13 +106,13 @@ storm = {n: with_hours(sun, [17], code=95) for n in "abc"}
 rows = hourly_rows(storm, DAY)
 by = {r["hour"]: r for r in rows}
 e = eval_trip(TRIPS[1], by)
-assert e["verdict"] == "STAY HOME" and e["reason"] == "thunderstorm at 17:00", e
-assert eval_trip(TRIPS[0], by)["verdict"] == "OK"                          # the morning trip is unaffected
-assert day_summary(rows)["score"] <= 49
+assert e["verdict"] == "DON'T RIDE" and e["reason"] == "thunderstorm at 17:00", e
+assert eval_trip(TRIPS[0], by)["verdict"] == "GO"                          # the morning trip is unaffected
+assert day_summary(rows)["score"] <= ride.STOP_CAP and day_summary(rows)["verdict"] == "RISKY"
 ice = {n: with_hours(sun, [8, 9, 10], t=0, rh=95) for n in "abc"}
-assert day_summary(hourly_rows(ice, DAY))["score"] <= 49
+assert day_summary(hourly_rows(ice, DAY))["score"] <= ride.STOP_CAP
 ev = eval_trip(TRIPS[0], {r["hour"]: r for r in hourly_rows(ice, DAY)})
-assert ev["verdict"] == "STAY HOME" and ev["reason"] == "ice risk (0°C, 95% humidity) at 08:00", ev
+assert ev["verdict"] == "DON'T RIDE" and ev["reason"] == "ice risk (0°C, 95% humidity) at 08:00", ev
 
 # --- stop votes: 2 of 5 count, 1 of 5 is outvoted but visible, a sole source is believed
 two = {**{n: with_hours(sun, [17], code=95) for n in "ab"}, **{n: sun for n in "cde"}}
@@ -90,7 +123,7 @@ assert r17["stop"] is None and r17["per"]["a"] == 0 and r17["score"] == 100
 assert {r["hour"]: r for r in hourly_rows({"a": with_hours(sun, [17], code=95)}, DAY)}[17]["stop"]
 
 # --- disagreement lowers a trip's score and is said in the text; a partial source is not counted as a full one
-bad = {k: OK._replace(t=2, rh=95, mm=1.0, pop=90, code=61) for k in sun}
+bad = {k: OK._replace(t=2, rh=95, mm=1.0, pop=90, code=61) for k in sun}   # RISKY: frost and rain
 rep = build_report(G, DAY, {"a": sun, "b": bad}, TRIPS)
 assert rep["trips"][0]["spread"] > 30 and "sources disagree" in rep["text"] and "DISAGREE" in rep["text"]
 assert "ONLY 1 source" in build_report(G, DAY, {"a": sun}, TRIPS)["text"]
@@ -102,25 +135,25 @@ assert "2 sources" in build_report(G, DAY, {"a": sun, "b": sun}, TRIPS)["text"]
 mon = build_report(G, MON, {"a": day_of(MON), "b": day_of(MON)}, TRIPS)
 sund = build_report(G, SUN, {"a": day_of(SUN), "b": day_of(SUN)}, TRIPS)
 assert [t["name"] for t in mon["trips"]] == ["work", "home", "out"] and [t["name"] for t in sund["trips"]] == ["out"]
-assert "🟢 work 07:30-09:00: OK, 22°C, 50% humidity, fine" in mon["text"] and "Mon 09 Nov · X, ES" in mon["text"].splitlines()[0]
-assert "Gear" not in mon["text"]
+assert "🟢 work 07:30-09:00: GO, 22°C, 50% humidity, fine" in mon["text"] and "Mon 09 Nov · X, ES" in mon["text"].splitlines()[0]
+assert "Gear" not in mon["text"] and "Ride:" not in mon["text"] and "Worst hour" not in mon["text"]
 assert "warm layers and gloves (4°C)" in build_report(G, MON, {"a": day_of(MON, t=4, rh=40), "b": day_of(MON, t=4, rh=40)}, TRIPS)["text"]
 rainy = build_report(G, MON, {"a": day_of(MON, mm=0.5), "b": day_of(MON, mm=0.5)}, TRIPS)["text"]
-assert "rain gear" in rainy and "rain 0.5 mm" in rainy
+assert "rain gear" in rainy and "light rain 0.5 mm/h" in rainy and "Ride: wet roads, brake early" in rainy and "🟢 work" in rainy
 notrips = build_report(G, MON, {"a": day_of(MON)}, [])
 assert notrips["trips"] == [] and "Whole day 08:00-20:00" in notrips["text"]
 
-# --- disagreement lowers the numbers, not just the label: a perfect source and a poor one
-poor = next(OK._replace(pop=None, mm=m / 100) for m in range(1, 200) if 40 <= hour_score(OK._replace(pop=None, mm=m / 100)) <= 45)
+# --- disagreement is reported, it does not move the numbers: a perfect source and a RISKY one
+poor = OK._replace(t=2, rh=95, mm=1.0, pop=90)
+assert level(poor) == 2
 half = {"a": sun, "b": {k: poor for k in sun}}
-avg_hour = (100 + hour_score(poor)) / 2                                    # >= 70: "OK" if the sources were not so far apart
 rows2 = hourly_rows(half, DAY)
-assert all(r["score"] == avg_hour for r in rows2) and avg_hour >= 70
-spread = 100 - hour_score(poor)
+mid = (100 + hour_score(poor)) / 2
+assert all(r["score"] == mid for r in rows2)
 tr = eval_trip(TRIPS[0], {r["hour"]: r for r in rows2})
-assert tr["score"] == avg_hour - round(spread / ride.SPREAD_DIVISOR) and tr["verdict"] == "CAUTION", tr   # the penalty flips OK to CAUTION
+assert tr["score"] == mid and tr["verdict"] == LEVEL_NAME(mid) and tr["spread"] == 100 - hour_score(poor) > ride.SPREAD_LIMIT, tr
 ds = day_summary(rows2)
-assert ds["score"] == round(avg_hour) - round(ds["spread"] / ride.SPREAD_DIVISOR) and ds["spread"] == spread, ds
+assert ds["score"] == round(mid) and ds["verdict"] == LEVEL_NAME(mid) and ds["spread"] == 100 - hour_score(poor), ds
 
 # --- partial data: a source missing hours still helps for the hours it has; no data at all is an error
 partial = {k: v for k, v in sun.items() if not k.endswith("T12:00")}
@@ -152,6 +185,35 @@ real = ride.fetch_sources(g)
 assert "MET.no" in real and "ECMWF" in real
 text = build_report(g, "2026-11-08", real, TRIPS)["text"]
 assert text.startswith("Sun 08 Nov · Salamanca") and "sources" in text
+
+# --- visibility: parsed per model when present, missing is fine, the worst source decides the consensus, two sources make a stop
+fogday = {n: with_hours(sun, [7], vis=50) for n in "ab"}
+r7 = {r["hour"]: r for r in hourly_rows(fogday, DAY)}[7]
+assert r7["stop"] == "poor visibility" and r7["reason"] == "fog, visibility 50 m" and r7["score"] == 0 and r7["level"] == 3
+mixed = {"a": with_hours(sun, [7], vis=150), "b": sun, "c": sun}   # only one source sees the fog: outvoted, visible, consensus keeps the worst
+r7 = {r["hour"]: r for r in hourly_rows(mixed, DAY)}[7]
+assert r7["stop"] is None and r7["w"].vis == 150 and r7["per"]["a"] == hour_score(OK._replace(vis=150)) and r7["score"] == 100
+rep = build_report(G, DAY, {n: with_hours(sun, [7, 8], vis=600) for n in "ab"}, TRIPS)
+assert rep["trips"][0]["verdict"] == "CAUTION" and "fog, visibility 600 m at 07:00" in rep["text"] and "clear visor, fog" in rep["text"] and "lights on" in rep["text"]
+rep = build_report(G, DAY, {n: with_hours(sun, [8], vis=150) for n in "ab"}, TRIPS)
+assert rep["trips"][0]["verdict"] == "RISKY" and "Worst hour: 08:00, 🟠 RISKY, fog, visibility 150 m" in rep["text"]
+fake_vis = {"hourly": {"time": ["2026-07-01T10:00"], **{f"{v}_{m}": [1] for m in ride.MODELS for v in ride.VARS if v != "visibility"}}}
+ride.get = lambda url, **p: fake_vis                                       # a model (or the whole API) without visibility
+assert ride.open_meteo(G)["ECMWF"]["2026-07-01T12:00"].vis is None
+fake_vis["hourly"]["visibility_ecmwf_ifs025"] = [8000]
+assert ride.open_meteo(G)["ECMWF"]["2026-07-01T12:00"].vis == 8000 and ride.open_meteo(G)["GFS"]["2026-07-01T12:00"].vis is None
+assert "visibility" in ride.VARS and ride.VARS[-1] == "visibility" and Hour._fields[-1] == "vis"
+
+# --- the day line: level and score of the day, of the best window, and the worst hour; a stop in the day caps it
+rep = build_report(G, DAY, {n: with_hours(sun, [15, 16], mm=2.0) for n in "abc"}, TRIPS)
+assert rep["summary"]["worst"]["hour"] in (15, 16) and "Worst hour: 15:00, 🟡 CAUTION, rain 2.0 mm/h" in rep["text"]
+assert "Best 3 hours: 08:00-11:00, 🟢 GO, 100/100" in rep["text"] and "Whole day 08:00-20:00: 🟢 GO" in rep["text"]
+assert "Worst hour" not in build_report(G, DAY, {"a": sun}, TRIPS)["text"]
+wk = ride.week_line(build_report(G, DAY, {n: with_hours(sun, [9], mm=0.1) for n in "ab"}, TRIPS))
+assert wk.startswith("🟢 Fri 02 Jan: GO") and "best" in wk
+storm_day = build_report(G, DAY, {n: with_hours(sun, [17], code=95) for n in "abc"}, TRIPS)
+assert storm_day["summary"]["verdict"] == "RISKY" and "Worst hour: 17:00, 🔴 DON'T RIDE, thunderstorm" in storm_day["text"]
+assert ride.week_line(storm_day).startswith("🟠 Fri 02 Jan: RISKY")
 
 # --- DST: every source is aligned on the real instant (Madrid: spring forward 2026-03-29, fall back 2026-10-25)
 tz = ZoneInfo("Europe/Madrid")
@@ -291,4 +353,4 @@ print("ok")
 
 # regression: spread penalty can push a trip score below 0; it must clamp, not crash
 _r = lambda s, per: dict(score=s, per=per, stop=False, reason="fine", hour=8, w=Hour(10, 50, 0, 0, 0, 0))
-assert ride.eval_trip(dict(name="x", **{k: v for k, v in ride.parse_trips("x 08:00-09:00")[0].items() if k != "name"}), {8: _r(5, {"a": 0, "b": 100})})["verdict"] == "STAY HOME"
+assert ride.eval_trip(dict(name="x", **{k: v for k, v in ride.parse_trips("x 08:00-09:00")[0].items() if k != "name"}), {8: _r(5, {"a": 0, "b": 100})})["verdict"] == "DON'T RIDE"
