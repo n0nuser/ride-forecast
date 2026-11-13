@@ -1,6 +1,6 @@
 # ride-forecast
 
-A Telegram bot that tells you whether to ride your motorbike. It checks six weather sources, judges each of your trips (the commute there, the commute back, an evening out) and answers in the chat. It sends tomorrow's forecast every night. You can ask for any day in the next week, or for a chart of the hours. It needs no API keys apart from the Telegram bot token.
+A Telegram bot that tells you whether to ride your motorbike. It checks six weather sources (seven in Spain with an AEMET key), judges each of your trips (the commute there, the commute back, an evening out) and answers in the chat. It sends tomorrow's forecast every night. You can ask for any day in the next week, or for a chart of the hours. It needs no API keys apart from the Telegram bot token; AEMET is optional.
 
 The trips are yours. Nothing is built in: you tell the bot when you ride, and it judges those hours.
 
@@ -41,6 +41,7 @@ It looks up the place with the Open-Meteo geocoding API, then asks six sources f
 
 - Five Open-Meteo models: ECMWF, GFS, ICON, Météo-France and the UK Met Office.
 - MET Norway, a separate API.
+- AEMET, the Spanish weather agency, only for places in Spain and only when `AEMET_API_KEY` is set (free, from opendata.aemet.es). It uses the nearest municipality's hourly forecast, which covers about 2 days; later days have one source fewer.
 
 Weather apps disagree, so each source is scored on its own and the scores are combined. The five Open-Meteo models are different forecast models behind one API, which makes MET Norway the only fully independent source. Every hour is converted to the place's local time from the real instant, so the sources line up across daylight saving changes.
 
@@ -132,6 +133,7 @@ Send `/today` to the bot, then `/trips` to add your trips. Stop it with Ctrl+C.
 |---|---|
 | `TELEGRAM_TOKEN`, `TELEGRAM_CHAT_ID` | The bot and the one chat it answers. Required. A malformed value stops the bot at startup with a clear message. |
 | `RIDE_PLACE`, `RIDE_COUNTRY` | The default place. `/place` overrides it. |
+| `AEMET_API_KEY` | Optional. Adds AEMET as a source for places in Spain. |
 | `RIDE_TRIPS` | The default trips. Optional: there are none built in. `/trips` overrides it. |
 | `RIDE_PUSH_TIME` | When the nightly report goes out, `HH:MM` local. Default `21:00`. |
 | `STATE_DIRECTORY` | Where `state.json` lives (the place, trips and last push). Default `~/.local/state/ride-forecast`; systemd sets it for you. |
