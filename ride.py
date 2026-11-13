@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """Motorbike weather verdicts from several sources, no API keys. Core library + one-shot CLI.
-Sources: 5 Open-Meteo models (ECMWF, GFS, ICON, Meteo-France, UK Met Office) + MET Norway.
+Sources: 5 Open-Meteo models (ECMWF, GFS, ICON, Meteo-France, UK Met Office) + MET Norway
++ AEMET (Spain only, needs a free AEMET_API_KEY; skipped when unset).
 Every source is rated per hour on four levels (GO, CAUTION, RISKY, DON'T RIDE): the worst real hazard wins
 (ice, rain, gusts, fog/visibility, heat, storm), and two CAUTION factors make RISKY. A 0-100 score is derived from the
 level, so verdicts, charts and rankings always agree. An hour's score is the median across sources; trips are judged
 on their worst hour; a DON'T RIDE hour reported by 2+ sources is a stop. Thresholds and their sources: docs/research/.
 Usage: ride.py "Salamanca" [--country ES] [--date YYYY-MM-DD] [--dry]
-Env:   RIDE_PLACE, RIDE_COUNTRY, RIDE_TRIPS, WEBHOOK_URL, TELEGRAM_TOKEN, TELEGRAM_CHAT_ID
+Env:   RIDE_PLACE, RIDE_COUNTRY, RIDE_TRIPS, AEMET_API_KEY, WEBHOOK_URL, TELEGRAM_TOKEN, TELEGRAM_CHAT_ID
 Target day: before 12:00 local = today, after = tomorrow. The Telegram bot is in bot.py.
 """
 from __future__ import annotations
@@ -78,7 +79,7 @@ class Hour(NamedTuple):
 
 def scrub(text):
     """Remove the Telegram token (in a URL or as an env value) from anything that gets logged."""
-    for k in ("TELEGRAM_TOKEN", "WEBHOOK_URL"):
+    for k in ("TELEGRAM_TOKEN", "WEBHOOK_URL", "AEMET_API_KEY"):
         if v := os.environ.get(k):
             text = text.replace(v, "***")
     return re.sub(r"bot\d+:[\w-]+", "bot***", text)
@@ -113,7 +114,11 @@ def get(url, retry=True, **params):
     for wait in (*RETRIES, None) if retry else (None,):
         try:
             with urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT) as r:
-                return json.load(r)
+                raw = r.read()
+            try:
+                return json.loads(raw)
+            except UnicodeDecodeError:  # AEMET sometimes answers in ISO-8859-1
+                return json.loads(raw.decode("latin-1"))
         except Exception as e:
             if wait is None or not retryable(e):
                 raise
@@ -284,13 +289,62 @@ def met_norway(g, tz):
     return out
 
 
+def aemet_code(sky):  # AEMET estadoCielo ("11", "43n", ...) -> the WMO codes this script cares about
+    n = int(re.sub(r"\D", "", sky or "") or 0)
+    return STORM[0] if n in (51, 52, 53, 54, 61, 62, 63, 64) else SNOW_ICE[4] if n in (33, 34, 35, 36, 71, 72, 73, 74) else FOG[0] if n == 81 else 0
+
+
+def aemet_town(g, key):
+    """Nearest AEMET municipality (INE code) to the place. The list is ~8000 towns, so fetch it once per process."""
+    global _AEMET_TOWNS
+    if _AEMET_TOWNS is None:
+        _AEMET_TOWNS = aemet_get("maestro/municipios", key)
+    la, lo = g["latitude"], g["longitude"]
+    t = min(_AEMET_TOWNS, key=lambda m: (float(m["latitud_dec"]) - la) ** 2 + (float(m["longitud_dec"]) - lo) ** 2)
+    return t["id"].removeprefix("id")
+
+
+_AEMET_TOWNS = None
+
+
+def aemet_get(path, key):
+    """AEMET OpenData answers with a link; the data is behind it."""
+    r = get("https://opendata.aemet.es/opendata/api/" + path, api_key=key)
+    if not r.get("datos"):
+        raise RuntimeError(f"AEMET: {r.get('estado')} {r.get('descripcion')}")
+    return get(r["datos"])
+
+
+def aemet(g, key):
+    """Hourly town forecast, Spain only. Covers about 2 days; later days simply have one source fewer."""
+    if (g.get("country_code") or "").upper() != "ES":
+        return {}
+    d = aemet_get(f"prediccion/especifica/municipio/horaria/{aemet_town(g, key)}", key)[0]["prediccion"]["dia"]
+    out = {}
+    for day in d:
+        def by_hour(field):
+            return {e["periodo"]: e for e in day.get(field, []) if len(e.get("periodo", "")) == 2}
+        temp, rh, mm, sky, wind = (by_hour(f) for f in ("temperatura", "humedadRelativa", "precipitacion", "estadoCielo", "vientoAndRachaMax"))
+        gusts = {e["periodo"]: e["value"] for e in day.get("vientoAndRachaMax", []) if "value" in e and len(e.get("periodo", "")) == 2}
+        for hh, t in temp.items():
+            try:
+                x = Hour(float(t["value"]), float(rh[hh]["value"]), None, float(mm[hh]["value"].replace("Ip", "0.1") if hh in mm else 0),
+                         float(gusts[hh]) if hh in gusts else None, aemet_code(sky[hh]["value"]) if hh in sky else 0)
+            except (KeyError, ValueError):
+                continue
+            out[f"{day['fecha'][:10]}T{hh}:00"] = x
+    return out
+
+
 def fetch_sources(g):
     """All providers at once. One being down must not kill the report; all being down must say so."""
     tz = ZoneInfo(g["timezone"])
     sources = {}
-    ex = ThreadPoolExecutor(2)
+    ex = ThreadPoolExecutor(3)
     try:
         futs = {"Open-Meteo": ex.submit(open_meteo, g), "MET.no": ex.submit(lambda: {"MET.no": met_norway(g, tz)})}
+        if key := os.environ.get("AEMET_API_KEY"):
+            futs["AEMET"] = ex.submit(lambda: {"AEMET": h} if (h := aemet(g, key)) else {})
         for name, f in futs.items():
             try:
                 sources.update(f.result())

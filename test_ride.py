@@ -186,6 +186,42 @@ assert "MET.no" in real and "ECMWF" in real
 text = build_report(g, "2026-11-08", real, TRIPS)["text"]
 assert text.startswith("Sun 08 Nov · Salamanca") and "sources" in text
 
+# --- AEMET (hand-built from the OpenData docs, not a live capture): two-step fetch, local hours, gusts, sky codes
+AE_TOWNS = [{"id": "id37274", "latitud_dec": "40.97", "longitud_dec": "-5.66"}, {"id": "id24089", "latitud_dec": "42.6", "longitud_dec": "-5.57"}]
+AE_DAY = {"fecha": "2026-11-08T00:00:00", "temperatura": [{"value": "9", "periodo": "12"}, {"value": "8", "periodo": "13"}],
+          "humedadRelativa": [{"value": "80", "periodo": "12"}, {"value": "85", "periodo": "13"}],
+          "precipitacion": [{"value": "0", "periodo": "12"}, {"value": "Ip", "periodo": "13"}],
+          "estadoCielo": [{"value": "11n", "periodo": "12"}, {"value": "61", "periodo": "13"}],
+          "probPrecipitacion": [{"value": "5", "periodo": "0007"}],
+          "vientoAndRachaMax": [{"direccion": ["N"], "velocidad": ["10"], "periodo": "12"}, {"value": "35", "periodo": "12"}]}
+def ae_get(url, **p):
+    if "opendata/api/" in url:
+        assert p == {"api_key": "K"}
+        return {"estado": 200, "datos": "https://data/" + url.rsplit("api/", 1)[1].replace("/", "_")}
+    return AE_TOWNS if url.endswith("maestro_municipios") else [{"prediccion": {"dia": [AE_DAY]}}]
+ride.get = ae_get
+ae = ride.aemet(g, "K")
+assert set(ae) == {"2026-11-08T12:00", "2026-11-08T13:00"}, ae
+assert ae["2026-11-08T12:00"] == Hour(9.0, 80.0, None, 0.0, 35.0, 0) and ae["2026-11-08T13:00"].code == 95 and ae["2026-11-08T13:00"].gust is None
+assert ride.aemet({**g, "country_code": "PT"}, "K") == {}
+assert ride.aemet_code("81") == 45 and ride.aemet_code("72n") == 71 and ride.aemet_code(None) == 0
+ride.get = lambda url, **p: {"estado": 401, "descripcion": "API key invalido"}
+try:
+    ride.aemet_get("x", "K"); raise SystemExit("expected failure")
+except RuntimeError as e:
+    assert "401" in str(e)
+ride.get = lambda url, **p: om if "open-meteo" in url else met
+os.environ["AEMET_API_KEY"] = "K"
+real_aemet = ride.aemet
+ride.aemet = lambda g, k: ae
+assert "AEMET" in ride.fetch_sources(g)
+def ae_down(g, k): raise OSError("down")
+ride.aemet = ae_down
+with quiet():
+    assert "AEMET" not in ride.fetch_sources(g) and "MET.no" in ride.fetch_sources(g)   # AEMET down: the others still answer
+del os.environ["AEMET_API_KEY"]
+ride.aemet = real_aemet
+
 # --- visibility: parsed per model when present, missing is fine, the worst source decides the consensus, two sources make a stop
 fogday = {n: with_hours(sun, [7], vis=50) for n in "ab"}
 r7 = {r["hour"]: r for r in hourly_rows(fogday, DAY)}[7]
